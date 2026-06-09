@@ -14,7 +14,7 @@ To clone and setup the repository:
 ```bash
 $ git clone https://github.com/alexemanuelol/team-detector.git
 $ cd team-detector
-$ pip install -r requirements.txt
+$ uv sync
 ```
 
 # Usage
@@ -52,7 +52,7 @@ are currently visible on the BattleMetrics server player list, are connected to 
 comments.
 
 ```bash
-$ python team_detector.py -a -b 11378166 -s 76561198114074446 -c --comment-pages 2 --auto-max-profiles 100 --request-delay 0.5
+$ uv run python team_detector.py -a -b 11378166 -s 76561198114074446 -c --comment-pages 2 --auto-max-profiles 100 --request-delay 0.5
 ```
 
 # Notes
