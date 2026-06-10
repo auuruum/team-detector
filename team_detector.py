@@ -595,7 +595,7 @@ class TeamDetector:
         nt = Network('2000px', '2000px')
         nt.from_nx(graph)
         nt.repulsion(damping=1)
-        nt.show(output_path, notebook=False)
+        nt.write_html(output_path, open_browser=False, notebook=False)
 
 
     def start_search(self, server_id: str, steam_ids: list, output_network: bool = True,
