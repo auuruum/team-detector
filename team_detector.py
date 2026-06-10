@@ -187,7 +187,7 @@ class TeamDetector:
             response.raise_for_status()  # Raises an HTTPError if the response status is not successful
             return response.text
         except requests.exceptions.RequestException as e:
-            print(f'Could not request: {url}. Error: {e}')
+            print(f'Could not request: {url}. Error: {e}', file=sys.stderr)
             return ''
 
 
@@ -586,7 +586,20 @@ class TeamDetector:
     #   Public methods
     ##################################################
 
-    def start_search(self, server_id: str, steam_ids: list):
+    def __render_network(self, graph, output_path: str):
+        """
+        Write a pyvis network graph to disk.
+        """
+        from pyvis.network import Network
+
+        nt = Network('2000px', '2000px')
+        nt.from_nx(graph)
+        nt.repulsion(damping=1)
+        nt.show(output_path, notebook=False)
+
+
+    def start_search(self, server_id: str, steam_ids: list, output_network: bool = True,
+                     network_output_path: str = 'team_network.html', human_output: bool = True) -> dict:
         """
         Starts the search for interconnected Steam profiles based on provided Steam IDs.
 
@@ -596,10 +609,11 @@ class TeamDetector:
         """
         self.__print(f'start_search(server_id:{server_id}, steam_ids:{len(steam_ids)})')
 
-        from pyvis.network import Network
-        import networkx as nx
-
-        G = nx.Graph()
+        if output_network:
+            import networkx as nx
+            G = nx.Graph()
+        else:
+            G = None
 
         battlemetrics_players = self.get_battlemetrics_players(server_id)
         found_players = []
@@ -643,8 +657,9 @@ class TeamDetector:
             people = self.__compare_people_to_battlemetrics_players(people, battlemetrics_players)
 
             # Create node connections
-            for item in people:
-                G.add_edges_from([(profile_name, item['name'])])
+            if G != None:
+                for item in people:
+                    G.add_edges_from([(profile_name, item['name'])])
 
             people = self.__compare_people_to_already_found_players(people, found_players)
 
@@ -654,7 +669,7 @@ class TeamDetector:
                     steam_id = self.get_steam_profile_steam_id_by_custom_id(item['custom_id'])
                 recursive_search(steam_id, recursive_depth + 1)
 
-            if recursives == 1:
+            if G != None and recursives == 1:
                 G.add_node(profile_name)
 
         for id in steam_ids:
@@ -671,26 +686,44 @@ class TeamDetector:
                 custom_id_in_connections = any(custom_id_outer != '' and custom_id_outer == connection['custom_id']
                                                for connection in connections_inner)
 
-                if steam_id_in_connections or custom_id_in_connections:
+                if G != None and (steam_id_in_connections or custom_id_in_connections):
                     G.add_edges_from([(name_outer, name_inner)])
 
-        print('\nTeam Detector Network written to:')
+        network_file = None
+        if output_network:
+            if human_output:
+                print('\nTeam Detector Network written to:')
 
-        nt = Network('2000px', '2000px')
-        nt.from_nx(G)
-        nt.repulsion(damping=1)
-        nt.show('team_network.html', notebook=False)
+            self.__render_network(G, network_output_path)
+            network_file = os.path.abspath(network_output_path)
 
-        print('\nTeam Detector Result:\n')
-        print('Name:'.ljust(34) + 'SteamID:'.ljust(19) + 'Link:')
+        if human_output:
+            print('\nTeam Detector Result:\n')
+            print('Name:'.ljust(34) + 'SteamID:'.ljust(19) + 'Link:')
 
-        for player in found_players:
-            print(f'{player["name"]}'.ljust(34) + f'{player["steam_id"]}'.ljust(19) +
-                  self.__get_url_steam_profile_by_steam_id(player['steam_id']))
+            for player in found_players:
+                print(f'{player["name"]}'.ljust(34) + f'{player["steam_id"]}'.ljust(19) +
+                      self.__get_url_steam_profile_by_steam_id(player['steam_id']))
+
+        return {
+            'mode': 'search',
+            'server_id': server_id,
+            'seed_steam_ids': steam_ids,
+            'network_file': network_file,
+            'inspected_profiles': searched_steam_ids,
+            'players': [{
+                'name': player['name'],
+                'steam_id': player['steam_id'],
+                'custom_id': player['custom_id'],
+                'profile_url': self.__get_url_steam_profile_by_steam_id(player['steam_id'])
+            } for player in found_players]
+        }
 
 
     def start_auto_discovery(self, server_id: str, steam_ids: list, max_profiles: int = AUTO_MAX_PROFILES,
-                             min_score: int = AUTO_MIN_SCORE):
+                             min_score: int = AUTO_MIN_SCORE, output_network: bool = True,
+                             network_output_path: str = 'team_network.html',
+                             human_output: bool = True) -> dict:
         """
         Starts a bounded teammate discovery crawl from one or more seed Steam IDs.
 
@@ -702,9 +735,6 @@ class TeamDetector:
         """
         self.__print(f'start_auto_discovery(server_id:{server_id}, steam_ids:{len(steam_ids)}, ' +
                      f'max_profiles:{max_profiles}, min_score:{min_score})')
-
-        from pyvis.network import Network
-        import networkx as nx
 
         battlemetrics_players = set(self.get_battlemetrics_players(server_id))
         seed_ids = set(steam_ids)
@@ -781,26 +811,33 @@ class TeamDetector:
                     queue.append((next_steam_id, depth + 1))
                     queued_steam_ids.add(next_steam_id)
 
-        G = nx.Graph()
+        if output_network:
+            import networkx as nx
+            G = nx.Graph()
+        else:
+            G = None
         visible_candidates = []
         for candidate in candidates.values():
             candidate['score'] = self.__score_candidate(candidate)
             if candidate['seed'] or candidate['inspected'] or candidate['online'] or candidate['score'] >= min_score:
                 visible_candidates.append(candidate)
-                G.add_node(candidate['name'])
+                if G != None:
+                    G.add_node(candidate['name'])
 
         visible_names = set(candidate['name'] for candidate in visible_candidates)
-        for candidate in visible_candidates:
-            for profile_name in candidate['connection_profile_names']:
-                if profile_name in visible_names:
-                    G.add_edges_from([(profile_name, candidate['name'])])
+        if G != None:
+            for candidate in visible_candidates:
+                for profile_name in candidate['connection_profile_names']:
+                    if profile_name in visible_names:
+                        G.add_edges_from([(profile_name, candidate['name'])])
 
-        print('\nTeam Detector Auto Network written to:')
+        network_file = None
+        if output_network:
+            if human_output:
+                print('\nTeam Detector Auto Network written to:')
 
-        nt = Network('2000px', '2000px')
-        nt.from_nx(G)
-        nt.repulsion(damping=1)
-        nt.show('team_network.html', notebook=False)
+            self.__render_network(G, network_output_path)
+            network_file = os.path.abspath(network_output_path)
 
         visible_candidates = sorted(
             visible_candidates,
@@ -808,18 +845,44 @@ class TeamDetector:
             reverse=True
         )
 
-        print('\nTeam Detector Auto Result:\n')
-        print('Name:'.ljust(34) + 'SteamID:'.ljust(19) + 'Score:'.ljust(8) +
-              'Online:'.ljust(9) + 'Sources:')
+        if human_output:
+            print('\nTeam Detector Auto Result:\n')
+            print('Name:'.ljust(34) + 'SteamID:'.ljust(19) + 'Score:'.ljust(8) +
+                  'Online:'.ljust(9) + 'Sources:')
 
-        for player in visible_candidates:
-            steam_id = '' if player['steam_id'] == None else player['steam_id']
-            sources = ','.join(sorted(player['sources']))
-            print(f'{player["name"]}'.ljust(34) + f'{steam_id}'.ljust(19) +
-                  f'{player["score"]}'.ljust(8) + f'{player["online"]}'.ljust(9) + sources)
+            for player in visible_candidates:
+                steam_id = '' if player['steam_id'] == None else player['steam_id']
+                sources = ','.join(sorted(player['sources']))
+                print(f'{player["name"]}'.ljust(34) + f'{steam_id}'.ljust(19) +
+                      f'{player["score"]}'.ljust(8) + f'{player["online"]}'.ljust(9) + sources)
 
-        print(f'\nInspected {len(searched_steam_ids)} Steam profiles. ' +
-              f'Candidates shown with score >= {min_score}, online on server, inspected, or seed.')
+            print(f'\nInspected {len(searched_steam_ids)} Steam profiles. ' +
+                  f'Candidates shown with score >= {min_score}, online on server, inspected, or seed.')
+
+        return {
+            'mode': 'auto_discovery',
+            'server_id': server_id,
+            'seed_steam_ids': steam_ids,
+            'network_file': network_file,
+            'inspected_profiles': searched_steam_ids,
+            'min_score': min_score,
+            'max_profiles': max_profiles,
+            'candidates': [{
+                'name': candidate['name'],
+                'steam_id': candidate['steam_id'],
+                'custom_id': candidate['custom_id'],
+                'score': candidate['score'],
+                'online': candidate['online'],
+                'seed': candidate['seed'],
+                'inspected': candidate['inspected'],
+                'sources': sorted(candidate['sources']),
+                'connection_profile_ids': sorted(candidate['connection_profile_ids']),
+                'seed_connection_profile_ids': sorted(candidate['seed_connection_profile_ids']),
+                'connection_profile_names': sorted(candidate['connection_profile_names']),
+                'profile_url': None if candidate['steam_id'] == None else
+                self.__get_url_steam_profile_by_steam_id(candidate['steam_id'])
+            } for candidate in visible_candidates]
+        }
 
 
     def get_battlemetrics_players(self, server_id: str) -> list:
@@ -1132,6 +1195,14 @@ def main():
                         help=f'Minimum score for non-online candidates in auto-discover mode (Default {AUTO_MIN_SCORE}).')
     parser.add_argument('--request-delay', type=float, required=False,
                         help='Delay in seconds between web requests (Default 0).')
+    parser.add_argument('--json', action='store_true', required=False,
+                        help='Print machine-readable JSON result. Suppresses human output.')
+    parser.add_argument('--no-network', action='store_true', required=False,
+                        help='Do not write the pyvis network HTML file.')
+    parser.add_argument('--network-output', type=str, required=False, default='team_network.html',
+                        help='Path for the generated network HTML file (Default team_network.html).')
+    parser.add_argument('--no-config', action='store_true', required=False,
+                        help='Do not read or write team_detector.json.')
     parser.add_argument('-d', '--debug', action='store_true', required=False, help='Enables debug print.')
     args = parser.parse_args()
 
@@ -1144,9 +1215,15 @@ def main():
     auto_max_profiles = AUTO_MAX_PROFILES if args.auto_max_profiles == None else args.auto_max_profiles
     auto_min_score = AUTO_MIN_SCORE if args.auto_min_score == None else args.auto_min_score
     request_delay = 0.0 if args.request_delay == None else args.request_delay
+    json_output = args.json
+    output_network = not args.no_network
+    network_output_path = args.network_output
+    use_config = not args.no_config
     debug = args.debug
 
-    config_battlemetrics_id, config_steam_id = read_config()
+    config_battlemetrics_id, config_steam_id = (None, None)
+    if use_config:
+        config_battlemetrics_id, config_steam_id = read_config()
 
     if battlemetrics_id == None:
         battlemetrics_id = config_battlemetrics_id
@@ -1156,7 +1233,7 @@ def main():
     if battlemetrics_id == None or steam_id == None:
         sys.exit('BattleMetrics Server ID or Steam ID is not provided.')
 
-    if debug:
+    if debug and not json_output:
         print('Running with the following arguments:')
         print(f' - Battlemetrics Server ID:     {battlemetrics_id}')
         print(f' - Steam ID(s):                 {steam_id}')
@@ -1167,16 +1244,25 @@ def main():
         print(f' - Auto Max Profiles:           {auto_max_profiles}')
         print(f' - Auto Min Score:              {auto_min_score}')
         print(f' - Request Delay:               {request_delay}')
+        print(f' - JSON Output:                 {json_output}')
+        print(f' - Network Output:              {output_network}')
+        print(f' - Network Output Path:         {network_output_path}')
+        print(f' - Config:                      {use_config}')
         print(f' - Debug:                       {debug}')
         print()
 
-    td = TeamDetector(debug, recursive_depth, comments, comment_pages, request_delay)
+    td = TeamDetector(debug and not json_output, recursive_depth, comments, comment_pages, request_delay)
     if auto_discover:
-        td.start_auto_discovery(battlemetrics_id, steam_id, auto_max_profiles, auto_min_score)
+        result = td.start_auto_discovery(battlemetrics_id, steam_id, auto_max_profiles, auto_min_score,
+                                         output_network, network_output_path, not json_output)
     else:
-        td.start_search(battlemetrics_id, steam_id)
+        result = td.start_search(battlemetrics_id, steam_id, output_network, network_output_path, not json_output)
 
-    write_config(battlemetrics_id, steam_id)
+    if json_output:
+        print(json.dumps(result, ensure_ascii=False))
+
+    if use_config:
+        write_config(battlemetrics_id, steam_id)
 
 
 if __name__ == '__main__':

@@ -31,6 +31,10 @@ $ uv sync
 | --auto-max-profiles NUMBER    | Maximum Steam profiles to inspect in auto-discover mode (Default 75).      |
 | --auto-min-score NUMBER       | Minimum score for non-online candidates in auto-discover mode (Default 4). |
 | --request-delay SECONDS       | Delay between web requests if you want to be gentler with rate limits.     |
+| --json                        | Print machine-readable JSON and suppress human table output.               |
+| --no-network                  | Do not write the pyvis network HTML file.                                  |
+| --network-output PATH         | Write the pyvis network HTML file to this path.                            |
+| --no-config                   | Do not read or write team_detector.json. Useful for integrations.          |
 | -d, --debug                   | Enables debug print (Default False).                                      |
 
 <br>
@@ -53,6 +57,12 @@ comments.
 
 ```bash
 $ uv run python team_detector.py -a -b 11378166 -s 76561198114074446 -c --comment-pages 2 --auto-max-profiles 100 --request-delay 0.5
+```
+
+For integrations such as rustplusplus, use JSON mode:
+
+```bash
+$ uv run python team_detector.py -a -b 11378166 -s 76561198114074446 --json --no-network --no-config
 ```
 
 # Notes
