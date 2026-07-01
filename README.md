@@ -14,7 +14,7 @@ To clone and setup the repository:
 ```bash
 $ git clone https://github.com/alexemanuelol/team-detector.git
 $ cd team-detector
-$ pip install -r requirements.txt
+$ uv sync
 ```
 
 # Usage
@@ -27,6 +27,14 @@ $ pip install -r requirements.txt
 | -r, --recursive-depth NUMBER  | How deep can the recursive search go? (Default 5)                         |
 | -c, --comments                | Search through profile comments (Default False).                          |
 | -p, --comment-pages PAGES     | The number of comment pages to go through per profile (Default 1 page).   |
+| -a, --auto-discover           | Auto-discover likely teammates from seed SteamID(s), friends, comments, and BattleMetrics names. |
+| --auto-max-profiles NUMBER    | Maximum Steam profiles to inspect in auto-discover mode (Default 75).      |
+| --auto-min-score NUMBER       | Minimum score for non-online candidates in auto-discover mode (Default 4). |
+| --request-delay SECONDS       | Delay between web requests if you want to be gentler with rate limits.     |
+| --json                        | Print machine-readable JSON and suppress human table output.               |
+| --no-network                  | Do not write the pyvis network HTML file.                                  |
+| --network-output PATH         | Write the pyvis network HTML file to this path.                            |
+| --no-config                   | Do not read or write team_detector.json. Useful for integrations.          |
 | -d, --debug                   | Enables debug print (Default False).                                      |
 
 <br>
@@ -40,6 +48,21 @@ You can download the windows executable from [releases](https://github.com/alexe
 
 ```bash
 $ team_detector.exe -b 11378166 -s 76561198114074446
+```
+
+Auto-discover mode lets you provide one or a few seed Steam IDs instead of a large manually collected list. It inspects
+their public friends and, when `--comments` is enabled, profile comment authors. Candidates are scored higher when they
+are currently visible on the BattleMetrics server player list, are connected to multiple inspected profiles, or appear in
+comments.
+
+```bash
+$ uv run python team_detector.py -a -b 11378166 -s 76561198114074446 -c --comment-pages 2 --auto-max-profiles 100 --request-delay 0.5
+```
+
+For integrations such as rustplusplus, use JSON mode:
+
+```bash
+$ uv run python team_detector.py -a -b 11378166 -s 76561198114074446 --json --no-network --no-config
 ```
 
 # Notes
