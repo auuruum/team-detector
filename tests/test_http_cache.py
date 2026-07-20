@@ -73,6 +73,16 @@ class HttpCacheTests(unittest.TestCase):
         self.assertEqual(result.source, 'network')
         self.assertTrue(any(seconds >= 3 for seconds in sleeps))
 
+    def test_request_headers_are_sent_only_to_the_requested_call(self):
+        session = Mock()
+        session.headers = {}
+        session.get.return_value = FakeResponse(200, text='ok')
+        client = ResilientHttpClient(self.cache_path, session=session)
+
+        client.get('https://api.example.test/a', 60, 600, headers={'Authorization': 'Bearer token'})
+
+        self.assertEqual(session.get.call_args.kwargs['headers'], {'Authorization': 'Bearer token'})
+
     def test_non_retryable_http_error_does_not_retry(self):
         session = Mock()
         session.headers = {}

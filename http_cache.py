@@ -140,7 +140,8 @@ class ResilientHttpClient:
         if wait > 0:
             self.sleep_fn(wait)
 
-    def get(self, url: str, ttl_seconds: float, stale_seconds: float, timeout: float = 20) -> FetchResult:
+    def get(self, url: str, ttl_seconds: float, stale_seconds: float, timeout: float = 20,
+            headers: dict | None = None) -> FetchResult:
         cached = self.cache.get(url, self.time_fn())
         if cached and cached['fresh']:
             return FetchResult(cached['body'], 'cache')
@@ -151,7 +152,7 @@ class ResilientHttpClient:
             self._respect_delay(host)
             self._last_request_at = self.time_fn()
             try:
-                response = self.session.get(url, timeout=timeout)
+                response = self.session.get(url, timeout=timeout, headers=headers)
                 if response.status_code not in self.RETRYABLE_STATUSES:
                     response.raise_for_status()
                     self.cache.put(url, response.text, ttl_seconds, stale_seconds, self.time_fn())

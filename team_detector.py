@@ -50,6 +50,7 @@ class TeamDetector:
         self.request_count = 0
         default_cache = Path(os.getenv('XDG_CACHE_HOME', Path.home() / '.cache')) / 'team-detector' / 'cache.sqlite'
         self.http = ResilientHttpClient(cache_path or str(default_cache), self.request_delay, request_retries)
+        self.battlemetrics_token = os.getenv('BATTLEMETRICS_TOKEN', '').strip()
         self.fetch_warnings = []
         self.fetch_stats = {'cache': 0, 'network': 0, 'stale': 0, 'failed': 0}
 
@@ -185,8 +186,11 @@ class TeamDetector:
 
         self.__print(f'Requesting: {url}')
         self.request_count += 1
+        request_headers = None
         if 'api.battlemetrics.com' in url:
             ttl_seconds, stale_seconds = 60, 5 * 60
+            if self.battlemetrics_token:
+                request_headers = {'Authorization': f'Bearer {self.battlemetrics_token}'}
         elif '/allcomments/' in url:
             ttl_seconds, stale_seconds = 24 * 60 * 60, 14 * 24 * 60 * 60
         elif '/friends/' in url:
@@ -194,7 +198,7 @@ class TeamDetector:
         else:
             ttl_seconds, stale_seconds = 6 * 60 * 60, 7 * 24 * 60 * 60
 
-        result = self.http.get(url, ttl_seconds, stale_seconds)
+        result = self.http.get(url, ttl_seconds, stale_seconds, headers=request_headers)
         self.fetch_stats[result.source] = self.fetch_stats.get(result.source, 0) + 1
         if result.warning and result.warning not in self.fetch_warnings:
             self.fetch_warnings.append(result.warning)
