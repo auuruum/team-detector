@@ -31,7 +31,8 @@ class TeamDetector:
 
     def __init__(self, debug: bool = False, recursive_depth: int = 5, search_comments: bool = False,
                  search_comments_max_pages: int = 1, request_delay: float = 0.0,
-                 cache_path: str | None = None, request_retries: int = 3):
+                 cache_path: str | None = None, request_retries: int = 3,
+                 battlemetrics_players: list[str] | None = None):
         """
         Initializes the TeamDetector instance.
 
@@ -51,6 +52,7 @@ class TeamDetector:
         default_cache = Path(os.getenv('XDG_CACHE_HOME', Path.home() / '.cache')) / 'team-detector' / 'cache.sqlite'
         self.http = ResilientHttpClient(cache_path or str(default_cache), self.request_delay, request_retries)
         self.battlemetrics_token = os.getenv('BATTLEMETRICS_TOKEN', '').strip()
+        self.battlemetrics_players = battlemetrics_players if battlemetrics_players else None
         self.fetch_warnings = []
         self.fetch_stats = {'cache': 0, 'network': 0, 'stale': 0, 'failed': 0}
 
@@ -932,6 +934,11 @@ class TeamDetector:
         try:
             self.__print(f'get_battlemetrics_players(server_id:{server_id})')
 
+            if self.battlemetrics_players is not None:
+                players = [self.__clean_name(player) for player in self.battlemetrics_players]
+                self.__print(f'get_battlemetrics_players(server_id:{server_id}) -> Rust++ snapshot[{len(players)}]')
+                return players
+
             content = self.__request(self.__get_url_battlemetrics(server_id))
             if content == '': exit()
             content = json.loads(content)
@@ -1233,6 +1240,8 @@ def main():
                         help='Persistent SQLite HTTP cache path.')
     parser.add_argument('--request-retries', type=int, required=False, default=3,
                         help='Retry count for rate limits and transient HTTP errors (Default 3).')
+    parser.add_argument('--battlemetrics-players-file', type=str, required=False,
+                        help='JSON list of current player names supplied by Rust++.')
     parser.add_argument('--json', action='store_true', required=False,
                         help='Print machine-readable JSON result. Suppresses human output.')
     parser.add_argument('--no-network', action='store_true', required=False,
@@ -1255,6 +1264,16 @@ def main():
     request_delay = 0.0 if args.request_delay == None else args.request_delay
     cache_path = args.cache_path
     request_retries = args.request_retries
+    battlemetrics_players = None
+    if args.battlemetrics_players_file:
+        try:
+            with open(args.battlemetrics_players_file, encoding='utf-8') as snapshot_file:
+                snapshot = json.load(snapshot_file)
+            if not isinstance(snapshot, list) or not all(isinstance(player, str) for player in snapshot):
+                raise ValueError('snapshot must be a JSON array of player names')
+            battlemetrics_players = snapshot
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            sys.exit(f'Could not read BattleMetrics player snapshot: {error}')
     json_output = args.json
     output_network = not args.no_network
     network_output_path = args.network_output
@@ -1292,7 +1311,7 @@ def main():
         print()
 
     td = TeamDetector(debug and not json_output, recursive_depth, comments, comment_pages, request_delay,
-                      cache_path, request_retries)
+                      cache_path, request_retries, battlemetrics_players)
     if auto_discover:
         result = td.start_auto_discovery(battlemetrics_id, steam_id, auto_max_profiles, auto_min_score,
                                          output_network, network_output_path, not json_output)

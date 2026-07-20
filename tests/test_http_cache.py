@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import requests
 
 from http_cache import PersistentHttpCache, ResilientHttpClient
+from team_detector import TeamDetector
 
 
 class FakeResponse:
@@ -72,6 +73,14 @@ class HttpCacheTests(unittest.TestCase):
         self.assertEqual(result.text, 'recovered')
         self.assertEqual(result.source, 'network')
         self.assertTrue(any(seconds >= 3 for seconds in sleeps))
+
+    def test_rustplusplus_player_snapshot_skips_battlemetrics_http(self):
+        detector = TeamDetector(battlemetrics_players=['Alice', 'Bob'])
+        detector.http.get = Mock(side_effect=AssertionError('BattleMetrics must not be requested'))
+
+        players = detector.get_battlemetrics_players('20151421')
+
+        self.assertEqual(players, ['Alice', 'Bob'])
 
     def test_request_headers_are_sent_only_to_the_requested_call(self):
         session = Mock()

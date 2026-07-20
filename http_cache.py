@@ -4,6 +4,7 @@ import os
 import random
 import sqlite3
 import time
+from contextlib import closing
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -30,7 +31,7 @@ class PersistentHttpCache:
         return connection
 
     def _initialize(self):
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute('''
                 CREATE TABLE IF NOT EXISTS http_cache (
                     cache_key TEXT PRIMARY KEY,
@@ -56,7 +57,7 @@ class PersistentHttpCache:
 
     def get(self, url: str, now: float | None = None):
         now = time.time() if now is None else now
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 'SELECT body, expires_at, stale_until FROM http_cache WHERE cache_key = ?',
                 (self.key_for(url),)
@@ -68,7 +69,7 @@ class PersistentHttpCache:
     def put(self, url: str, body: str, ttl_seconds: float, stale_seconds: float,
             now: float | None = None):
         now = time.time() if now is None else now
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute('''
                 INSERT INTO http_cache(cache_key, url, body, fetched_at, expires_at, stale_until)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -81,7 +82,7 @@ class PersistentHttpCache:
             ''', (self.key_for(url), url, body, now, now + ttl_seconds, now + stale_seconds))
 
     def get_rate_state(self, host: str):
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 'SELECT cooldown_until, failures FROM host_rate_state WHERE host = ?', (host,)
             ).fetchone()
@@ -90,7 +91,7 @@ class PersistentHttpCache:
         }
 
     def set_rate_state(self, host: str, cooldown_until: float, failures: int):
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute('''
                 INSERT INTO host_rate_state(host, cooldown_until, failures, updated_at)
                 VALUES (?, ?, ?, ?)
