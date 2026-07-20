@@ -16,9 +16,10 @@ import html
 import json
 import os
 import re
-import requests
 import sys
-import time
+
+from pathlib import Path
+from http_cache import ResilientHttpClient
 
 JSON_FILE = 'team_detector.json'
 RECURSIVE_DEPTH = 5
@@ -29,7 +30,8 @@ AUTO_MIN_SCORE = 4
 class TeamDetector:
 
     def __init__(self, debug: bool = False, recursive_depth: int = 5, search_comments: bool = False,
-                 search_comments_max_pages: int = 1, request_delay: float = 0.0):
+                 search_comments_max_pages: int = 1, request_delay: float = 0.0,
+                 cache_path: str | None = None, request_retries: int = 3):
         """
         Initializes the TeamDetector instance.
 
@@ -46,6 +48,10 @@ class TeamDetector:
         self.search_comments_max_pages = search_comments_max_pages
         self.request_delay = max(0.0, request_delay)
         self.request_count = 0
+        default_cache = Path(os.getenv('XDG_CACHE_HOME', Path.home() / '.cache')) / 'team-detector' / 'cache.sqlite'
+        self.http = ResilientHttpClient(cache_path or str(default_cache), self.request_delay, request_retries)
+        self.fetch_warnings = []
+        self.fetch_stats = {'cache': 0, 'network': 0, 'stale': 0, 'failed': 0}
 
         self.steam_profiles = dict()                    # steam_id as key and steam profile content as value
         self.steam_profiles_friends = dict()            # steam_id as key and steam friends list as value
@@ -173,22 +179,28 @@ class TeamDetector:
 
         Raises:
             ValueError: If the URL is empty or None.
-            requests.exceptions.RequestException: If there's an error during the request.
         """
         if not url:
             raise ValueError(f'URL cannot be empty or None. URL: {url}')
 
-        try:
-            self.__print(f'Requesting: {url}')
-            if self.request_delay > 0 and self.request_count > 0:
-                time.sleep(self.request_delay)
-            self.request_count += 1
-            response = requests.get(url, timeout=20)
-            response.raise_for_status()  # Raises an HTTPError if the response status is not successful
-            return response.text
-        except requests.exceptions.RequestException as e:
-            print(f'Could not request: {url}. Error: {e}', file=sys.stderr)
-            return ''
+        self.__print(f'Requesting: {url}')
+        self.request_count += 1
+        if 'api.battlemetrics.com' in url:
+            ttl_seconds, stale_seconds = 60, 5 * 60
+        elif '/allcomments/' in url:
+            ttl_seconds, stale_seconds = 24 * 60 * 60, 14 * 24 * 60 * 60
+        elif '/friends/' in url:
+            ttl_seconds, stale_seconds = 12 * 60 * 60, 7 * 24 * 60 * 60
+        else:
+            ttl_seconds, stale_seconds = 6 * 60 * 60, 7 * 24 * 60 * 60
+
+        result = self.http.get(url, ttl_seconds, stale_seconds)
+        self.fetch_stats[result.source] = self.fetch_stats.get(result.source, 0) + 1
+        if result.warning and result.warning not in self.fetch_warnings:
+            self.fetch_warnings.append(result.warning)
+        if result.source == 'failed':
+            print(f'Could not request: {url}. Error: {result.warning}', file=sys.stderr)
+        return result.text
 
 
     def __clean_name(self, name: str) -> str:
@@ -739,6 +751,7 @@ class TeamDetector:
         battlemetrics_players = set(self.get_battlemetrics_players(server_id))
         seed_ids = set(steam_ids)
         searched_steam_ids = []
+        skipped_steam_ids = []
         queued_steam_ids = set(steam_ids)
         queue = [(steam_id, 0) for steam_id in steam_ids]
         candidates = dict()
@@ -780,7 +793,14 @@ class TeamDetector:
             self.__print(f'start_auto_discovery:inspect(profile_steam_id:{profile_steam_id}, depth:{depth})')
             searched_steam_ids.append(profile_steam_id)
 
-            profile_name, profile_custom_id, people = self.__collect_profile_people(profile_steam_id)
+            try:
+                profile_name, profile_custom_id, people = self.__collect_profile_people(profile_steam_id)
+            except SystemExit as error:
+                skipped_steam_ids.append(profile_steam_id)
+                warning = f'Skipped Steam profile {profile_steam_id}: {error or "request unavailable"}'
+                if warning not in self.fetch_warnings:
+                    self.fetch_warnings.append(warning)
+                continue
 
             profile_candidate = ensure_candidate({
                 'steam_id': profile_steam_id,
@@ -865,8 +885,12 @@ class TeamDetector:
             'seed_steam_ids': steam_ids,
             'network_file': network_file,
             'inspected_profiles': searched_steam_ids,
+            'skipped_profiles': skipped_steam_ids,
             'min_score': min_score,
             'max_profiles': max_profiles,
+            'fetch_stats': self.fetch_stats,
+            'warnings': self.fetch_warnings,
+            'partial': self.fetch_stats.get('failed', 0) > 0 or len(skipped_steam_ids) > 0,
             'candidates': [{
                 'name': candidate['name'],
                 'steam_id': candidate['steam_id'],
@@ -1195,6 +1219,10 @@ def main():
                         help=f'Minimum score for non-online candidates in auto-discover mode (Default {AUTO_MIN_SCORE}).')
     parser.add_argument('--request-delay', type=float, required=False,
                         help='Delay in seconds between web requests (Default 0).')
+    parser.add_argument('--cache-path', type=str, required=False,
+                        help='Persistent SQLite HTTP cache path.')
+    parser.add_argument('--request-retries', type=int, required=False, default=3,
+                        help='Retry count for rate limits and transient HTTP errors (Default 3).')
     parser.add_argument('--json', action='store_true', required=False,
                         help='Print machine-readable JSON result. Suppresses human output.')
     parser.add_argument('--no-network', action='store_true', required=False,
@@ -1215,6 +1243,8 @@ def main():
     auto_max_profiles = AUTO_MAX_PROFILES if args.auto_max_profiles == None else args.auto_max_profiles
     auto_min_score = AUTO_MIN_SCORE if args.auto_min_score == None else args.auto_min_score
     request_delay = 0.0 if args.request_delay == None else args.request_delay
+    cache_path = args.cache_path
+    request_retries = args.request_retries
     json_output = args.json
     output_network = not args.no_network
     network_output_path = args.network_output
@@ -1251,7 +1281,8 @@ def main():
         print(f' - Debug:                       {debug}')
         print()
 
-    td = TeamDetector(debug and not json_output, recursive_depth, comments, comment_pages, request_delay)
+    td = TeamDetector(debug and not json_output, recursive_depth, comments, comment_pages, request_delay,
+                      cache_path, request_retries)
     if auto_discover:
         result = td.start_auto_discovery(battlemetrics_id, steam_id, auto_max_profiles, auto_min_score,
                                          output_network, network_output_path, not json_output)
