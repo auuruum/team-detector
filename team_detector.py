@@ -822,7 +822,13 @@ class TeamDetector:
                 next_steam_id = candidate['steam_id']
                 if next_steam_id == None and (candidate['online'] or score >= min_score) and \
                     candidate['custom_id'] != None:
-                    next_steam_id = self.get_steam_profile_steam_id_by_custom_id(candidate['custom_id'])
+                    try:
+                        next_steam_id = self.get_steam_profile_steam_id_by_custom_id(candidate['custom_id'])
+                    except SystemExit as error:
+                        warning = f'Skipped Steam vanity {candidate["custom_id"]}: {error or "request unavailable"}'
+                        if warning not in self.fetch_warnings:
+                            self.fetch_warnings.append(warning)
+                        continue
                     candidate['steam_id'] = next_steam_id
 
                 if next_steam_id != None and next_steam_id not in queued_steam_ids and \
