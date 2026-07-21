@@ -21,6 +21,15 @@ import sys
 from pathlib import Path
 from http_cache import ResilientHttpClient
 
+
+def roster_name_match(name: str, name_counts: dict[str, int]) -> tuple[bool, str | None]:
+    count = name_counts.get(name, 0)
+    if count == 1:
+        return True, 'exact_unique'
+    if count > 1:
+        return False, 'exact_ambiguous'
+    return False, None
+
 JSON_FILE = 'team_detector.json'
 RECURSIVE_DEPTH = 5
 COMMENT_PAGES = 1
@@ -32,7 +41,8 @@ class TeamDetector:
     def __init__(self, debug: bool = False, recursive_depth: int = 5, search_comments: bool = False,
                  search_comments_max_pages: int = 1, request_delay: float = 0.0,
                  cache_path: str | None = None, request_retries: int = 3,
-                 battlemetrics_players: list[str] | None = None):
+                 battlemetrics_players: list[str] | None = None,
+                 player_roster: dict | None = None):
         """
         Initializes the TeamDetector instance.
 
@@ -53,6 +63,28 @@ class TeamDetector:
         self.http = ResilientHttpClient(cache_path or str(default_cache), self.request_delay, request_retries)
         self.battlemetrics_token = os.getenv('BATTLEMETRICS_TOKEN', '').strip()
         self.battlemetrics_players = battlemetrics_players if battlemetrics_players else None
+        if player_roster is not None:
+            self.player_roster = player_roster
+        elif battlemetrics_players is not None:
+            self.player_roster = {
+                'source': 'rustplusplus_battlemetrics_snapshot',
+                'available': True,
+                'complete': True,
+                'players': battlemetrics_players
+            }
+        else:
+            self.player_roster = None
+        self.roster_status = {
+            'source': 'battlemetrics',
+            'capability': 'names_only',
+            'available': None,
+            'complete': False,
+            'observed_at': None,
+            'size': 0,
+            'unique_names': 0,
+            'name_counts': {},
+            'reason': None
+        }
         self.fetch_warnings = []
         self.fetch_stats = {'cache': 0, 'network': 0, 'stale': 0, 'failed': 0}
 
@@ -487,9 +519,12 @@ class TeamDetector:
         Returns:
             list: A list of dictionaries containing people who match the names in the BattleMetrics players list.
         """
+        name_counts = {}
+        for name in battlemetrics_players:
+            name_counts[name] = name_counts.get(name, 0) + 1
         temp = []
         for item in people:
-            if item['name'] in battlemetrics_players:
+            if roster_name_match(item['name'], name_counts)[0]:
                 temp.append(item)
 
         self.__print(f'__compare_people_to_battlemetrics_players(List[people:{len(people)}], ' +
@@ -729,6 +764,9 @@ class TeamDetector:
             'seed_steam_ids': steam_ids,
             'network_file': network_file,
             'inspected_profiles': searched_steam_ids,
+            'roster': self.roster_status,
+            'warnings': self.fetch_warnings,
+            'partial': not self.roster_status.get('available', False),
             'players': [{
                 'name': player['name'],
                 'steam_id': player['steam_id'],
@@ -754,7 +792,8 @@ class TeamDetector:
         self.__print(f'start_auto_discovery(server_id:{server_id}, steam_ids:{len(steam_ids)}, ' +
                      f'max_profiles:{max_profiles}, min_score:{min_score})')
 
-        battlemetrics_players = set(self.get_battlemetrics_players(server_id))
+        self.get_battlemetrics_players(server_id)
+        online_name_counts = self.roster_status.get('name_counts', {})
         seed_ids = set(steam_ids)
         searched_steam_ids = []
         skipped_steam_ids = []
@@ -773,7 +812,8 @@ class TeamDetector:
                     'connection_profile_ids': set(),
                     'seed_connection_profile_ids': set(),
                     'connection_profile_names': set(),
-                    'online': person['name'] in battlemetrics_players,
+                    'online': roster_name_match(person['name'], online_name_counts)[0],
+                    'online_confidence': roster_name_match(person['name'], online_name_counts)[1],
                     'seed': person['steam_id'] in seed_ids,
                     'inspected': False
                 }
@@ -785,7 +825,10 @@ class TeamDetector:
                 candidate['custom_id'] = person['custom_id']
             if candidate['name'] == '' and person['name'] != '':
                 candidate['name'] = person['name']
-            candidate['online'] = candidate['online'] or person['name'] in battlemetrics_players
+            online, confidence = roster_name_match(person['name'], online_name_counts)
+            candidate['online'] = candidate['online'] or online
+            if confidence == 'exact_unique' or candidate['online_confidence'] is None:
+                candidate['online_confidence'] = confidence
             candidate['seed'] = candidate['seed'] or person['steam_id'] in seed_ids
             return candidate
 
@@ -902,13 +945,16 @@ class TeamDetector:
             'max_profiles': max_profiles,
             'fetch_stats': self.fetch_stats,
             'warnings': self.fetch_warnings,
-            'partial': self.fetch_stats.get('failed', 0) > 0 or len(skipped_steam_ids) > 0,
+            'roster': self.roster_status,
+            'partial': self.fetch_stats.get('failed', 0) > 0 or len(skipped_steam_ids) > 0 or
+                       not self.roster_status.get('available', False),
             'candidates': [{
                 'name': candidate['name'],
                 'steam_id': candidate['steam_id'],
                 'custom_id': candidate['custom_id'],
                 'score': candidate['score'],
                 'online': candidate['online'],
+                'online_confidence': candidate['online_confidence'],
                 'seed': candidate['seed'],
                 'inspected': candidate['inspected'],
                 'sources': sorted(candidate['sources']),
@@ -931,26 +977,65 @@ class TeamDetector:
         Returns:
             list: A list of player names currently connected to the server.
         """
+        self.__print(f'get_battlemetrics_players(server_id:{server_id})')
+
+        if self.player_roster is not None:
+            source = str(self.player_roster.get('source') or 'rustplusplus_snapshot')
+            available = bool(self.player_roster.get('available'))
+            raw_players = self.player_roster.get('players', [])
+            players = [self.__clean_name(player) for player in raw_players if isinstance(player, str) and player != '']
+            if not available:
+                players = []
+            name_counts = {}
+            for player in players:
+                name_counts[player] = name_counts.get(player, 0) + 1
+            self.roster_status = {
+                'source': source,
+                'capability': str(self.player_roster.get('capability') or 'names_only'),
+                'available': available,
+                'complete': bool(self.player_roster.get('complete', False)),
+                'observed_at': self.player_roster.get('observedAt'),
+                'size': len(players),
+                'unique_names': len(name_counts),
+                'name_counts': name_counts,
+                'reason': self.player_roster.get('reason')
+            }
+            if not available:
+                warning = f'Player roster unavailable from {source}: {self.roster_status["reason"] or "unknown reason"}'
+                if warning not in self.fetch_warnings:
+                    self.fetch_warnings.append(warning)
+            self.__print(f'get_battlemetrics_players(server_id:{server_id}) -> {source}[{len(players)}]')
+            return players
+
         try:
-            self.__print(f'get_battlemetrics_players(server_id:{server_id})')
-
-            if self.battlemetrics_players is not None:
-                players = [self.__clean_name(player) for player in self.battlemetrics_players]
-                self.__print(f'get_battlemetrics_players(server_id:{server_id}) -> Rust++ snapshot[{len(players)}]')
-                return players
-
             content = self.__request(self.__get_url_battlemetrics(server_id))
-            if content == '': exit()
+            if content == '':
+                raise RuntimeError('BattleMetrics returned no usable player roster')
             content = json.loads(content)
-
-            players = []
-            for player in content['included']:
-                players.append(self.__clean_name(player['attributes']['name']))
-
+            players = [self.__clean_name(player['attributes']['name']) for player in content.get('included', [])
+                       if player.get('type') == 'player']
+            name_counts = {}
+            for player in players:
+                name_counts[player] = name_counts.get(player, 0) + 1
+            self.roster_status = {
+                'source': 'battlemetrics',
+                'capability': 'names_only',
+                'available': True,
+                'complete': True,
+                'observed_at': None,
+                'size': len(players),
+                'unique_names': len(name_counts),
+                'name_counts': name_counts,
+                'reason': None
+            }
             self.__print(f'get_battlemetrics_players(server_id:{server_id}) -> List[players:{len(players)}]')
             return players
-        except Exception as e:
-            sys.exit(e)
+        except (RuntimeError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+            self.roster_status.update({'available': False, 'reason': str(error)})
+            warning = f'BattleMetrics roster unavailable: {error}'
+            if warning not in self.fetch_warnings:
+                self.fetch_warnings.append(warning)
+            return []
 
 
     def get_steam_profile_steam_id_by_custom_id(self, custom_id: str) -> str:
@@ -1242,6 +1327,8 @@ def main():
                         help='Retry count for rate limits and transient HTTP errors (Default 3).')
     parser.add_argument('--battlemetrics-players-file', type=str, required=False,
                         help='JSON list of current player names supplied by Rust++.')
+    parser.add_argument('--player-roster-file', type=str, required=False,
+                        help='Source-aware JSON player roster supplied by Rust++.')
     parser.add_argument('--json', action='store_true', required=False,
                         help='Print machine-readable JSON result. Suppresses human output.')
     parser.add_argument('--no-network', action='store_true', required=False,
@@ -1265,6 +1352,20 @@ def main():
     cache_path = args.cache_path
     request_retries = args.request_retries
     battlemetrics_players = None
+    player_roster = None
+    if args.player_roster_file:
+        try:
+            with open(args.player_roster_file, encoding='utf-8') as snapshot_file:
+                player_roster = json.load(snapshot_file)
+            if not isinstance(player_roster, dict):
+                raise ValueError('snapshot must be a JSON object')
+            players = player_roster.get('players', [])
+            if not isinstance(players, list) or not all(isinstance(player, str) for player in players):
+                raise ValueError('snapshot players must be a JSON array of names')
+            if not isinstance(player_roster.get('available'), bool):
+                raise ValueError('snapshot available must be boolean')
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            sys.exit(f'Could not read player roster snapshot: {error}')
     if args.battlemetrics_players_file:
         try:
             with open(args.battlemetrics_players_file, encoding='utf-8') as snapshot_file:
@@ -1311,7 +1412,7 @@ def main():
         print()
 
     td = TeamDetector(debug and not json_output, recursive_depth, comments, comment_pages, request_delay,
-                      cache_path, request_retries, battlemetrics_players)
+                      cache_path, request_retries, battlemetrics_players, player_roster)
     if auto_discover:
         result = td.start_auto_discovery(battlemetrics_id, steam_id, auto_max_profiles, auto_min_score,
                                          output_network, network_output_path, not json_output)

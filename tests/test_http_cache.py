@@ -1,12 +1,12 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import requests
 
 from http_cache import PersistentHttpCache, ResilientHttpClient
-from team_detector import TeamDetector
+from team_detector import TeamDetector, roster_name_match
 
 
 class FakeResponse:
@@ -81,6 +81,53 @@ class HttpCacheTests(unittest.TestCase):
         players = detector.get_battlemetrics_players('20151421')
 
         self.assertEqual(players, ['Alice', 'Bob'])
+
+    def test_source_aware_a2s_snapshot_preserves_duplicate_names(self):
+        snapshot = {
+            'source': 'a2s',
+            'available': True,
+            'complete': True,
+            'observedAt': 123456,
+            'players': ['Alice', 'Alice', 'Bob']
+        }
+        detector = TeamDetector(player_roster=snapshot)
+        detector.http.get = Mock(side_effect=AssertionError('BattleMetrics must not be requested'))
+
+        players = detector.get_battlemetrics_players('20151421')
+
+        self.assertEqual(players, ['Alice', 'Alice', 'Bob'])
+        self.assertEqual(detector.roster_status['source'], 'a2s')
+        self.assertEqual(detector.roster_status['name_counts'], {'Alice': 2, 'Bob': 1})
+
+    def test_unavailable_snapshot_returns_partial_roster_without_battlemetrics_request(self):
+        snapshot = {
+            'source': 'a2s',
+            'available': False,
+            'players': [],
+            'reason': 'A2S_PLAYER timed out'
+        }
+        detector = TeamDetector(player_roster=snapshot)
+        detector.http.get = Mock(side_effect=AssertionError('BattleMetrics must not be requested'))
+
+        players = detector.get_battlemetrics_players('20151421')
+
+        self.assertEqual(players, [])
+        self.assertEqual(detector.roster_status['available'], False)
+        self.assertTrue(detector.fetch_warnings)
+
+    def test_duplicate_roster_name_is_ambiguous_not_online(self):
+        self.assertEqual(roster_name_match('Alice', {'Alice': 1}), (True, 'exact_unique'))
+        self.assertEqual(roster_name_match('Alice', {'Alice': 2}), (False, 'exact_ambiguous'))
+        self.assertEqual(roster_name_match('Bob', {'Alice': 1}), (False, None))
+
+    def test_direct_battlemetrics_failure_returns_partial_roster_instead_of_exiting(self):
+        detector = TeamDetector()
+        with patch.object(detector, '_TeamDetector__request', return_value=''):
+            players = detector.get_battlemetrics_players('20151421')
+
+        self.assertEqual(players, [])
+        self.assertEqual(detector.roster_status['available'], False)
+        self.assertTrue(detector.fetch_warnings)
 
     def test_request_headers_are_sent_only_to_the_requested_call(self):
         session = Mock()

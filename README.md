@@ -1,7 +1,7 @@
 # Team-Detector
-Team detection program for games on BattleMetrics and Steam. The program goes through the player list on the
-BattleMetrics server page and saves all player names in an array. Then it goes through the Steam profile of the player
-you want to inspect and compares the friend list names and profile comments with the BattleMetrics player array to
+Team detection program for Rust player rosters and Steam. The program accepts a source-aware current-player snapshot
+from Rust++ or uses BattleMetrics when it is available. Then it goes through the Steam profile of the player
+you want to inspect and compares the friend list names and profile comments with the current-player roster to
 find out which friends are currently on the server. If the program found any matches, it will then continue to go
 through the friend list of those friends and so on. What you end up with is a table of all the players that might be
 part of the same team as the player you provided the Steam Profile. It will also create a .html file that visualize the
@@ -27,9 +27,10 @@ $ uv sync
 | -r, --recursive-depth NUMBER  | How deep can the recursive search go? (Default 5)                         |
 | -c, --comments                | Search through profile comments (Default False).                          |
 | -p, --comment-pages PAGES     | The number of comment pages to go through per profile (Default 1 page).   |
-| -a, --auto-discover           | Auto-discover likely teammates from seed SteamID(s), friends, comments, and BattleMetrics names. |
+| -a, --auto-discover           | Auto-discover likely teammates from seed SteamID(s), friends, comments, and roster names. |
 | --auto-max-profiles NUMBER    | Maximum Steam profiles to inspect in auto-discover mode (Default 75).      |
 | --auto-min-score NUMBER       | Minimum score for non-online candidates in auto-discover mode (Default 4). |
+| --player-roster-file FILE     | Source-aware current-player JSON snapshot supplied by Rust++.             |
 | --request-delay SECONDS       | Delay between web requests if you want to be gentler with rate limits.     |
 | --json                        | Print machine-readable JSON and suppress human table output.               |
 | --no-network                  | Do not write the pyvis network HTML file.                                  |
@@ -52,7 +53,7 @@ $ team_detector.exe -b 11378166 -s 76561198114074446
 
 Auto-discover mode lets you provide one or a few seed Steam IDs instead of a large manually collected list. It inspects
 their public friends and, when `--comments` is enabled, profile comment authors. Candidates are scored higher when they
-are currently visible on the BattleMetrics server player list, are connected to multiple inspected profiles, or appear in
+are currently visible in the selected server roster, are connected to multiple inspected profiles, or appear in
 comments.
 
 ```bash
@@ -66,4 +67,6 @@ $ uv run python team_detector.py -a -b 11378166 -s 76561198114074446 --json --no
 ```
 
 # Notes
-The program will only find players that are currently online on the server that is displayed in the BattleMetrics Server Page. If the server have streamer mode on, this program won't work. Also, if you try to run the script on a person that have the friend list private and comments private, this program won't work.
+The program can only mark players online when the selected source provides a current roster. A2S snapshots contain
+display names but no Steam IDs, so duplicate names are reported as ambiguous rather than treated as permanent identity
+bindings. If the server hides `A2S_PLAYER`, or a Steam profile has private friends and comments, results may be partial.
