@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sys
+import time
 
 from pathlib import Path
 from http_cache import ResilientHttpClient
@@ -35,6 +36,7 @@ RECURSIVE_DEPTH = 5
 COMMENT_PAGES = 1
 AUTO_MAX_PROFILES = 75
 AUTO_MIN_SCORE = 4
+AUTO_MAX_RUNTIME_SECONDS = 150.0
 
 class TeamDetector:
 
@@ -42,7 +44,7 @@ class TeamDetector:
                  search_comments_max_pages: int = 1, request_delay: float = 0.0,
                  cache_path: str | None = None, request_retries: int = 3,
                  battlemetrics_players: list[str] | None = None,
-                 player_roster: dict | None = None):
+                 player_roster: dict | None = None, monotonic_fn=time.monotonic):
         """
         Initializes the TeamDetector instance.
 
@@ -88,6 +90,7 @@ class TeamDetector:
         }
         self.fetch_warnings = []
         self.fetch_stats = {'cache': 0, 'network': 0, 'stale': 0, 'failed': 0}
+        self.monotonic_fn = monotonic_fn
 
         self.steam_profiles = dict()                    # steam_id as key and steam profile content as value
         self.steam_profiles_friends = dict()            # steam_id as key and steam friends list as value
@@ -782,7 +785,8 @@ class TeamDetector:
     def start_auto_discovery(self, server_id: str, steam_ids: list, max_profiles: int = AUTO_MAX_PROFILES,
                              min_score: int = AUTO_MIN_SCORE, output_network: bool = True,
                              network_output_path: str = 'team_network.html',
-                             human_output: bool = True) -> dict:
+                             human_output: bool = True,
+                             max_runtime_seconds: float | None = AUTO_MAX_RUNTIME_SECONDS) -> dict:
         """
         Starts a bounded teammate discovery crawl from one or more seed Steam IDs.
 
@@ -804,6 +808,10 @@ class TeamDetector:
         queue = [(steam_id, 0, 1000) for steam_id in steam_ids]
         candidates = dict()
         comment_profiles = []
+        started_at = self.monotonic_fn()
+        runtime_budget = None if max_runtime_seconds is None or max_runtime_seconds <= 0 else max_runtime_seconds
+        deadline = None if runtime_budget is None else started_at + runtime_budget
+        stop_reason = None
 
         def ensure_candidate(person: dict) -> dict:
             key = self.__get_person_key(person)
@@ -837,6 +845,12 @@ class TeamDetector:
             return candidate
 
         while len(queue) > 0 and len(searched_steam_ids) < max_profiles:
+            if deadline is not None and self.monotonic_fn() >= deadline:
+                stop_reason = 'runtime_budget'
+                warning = f'Team discovery reached its {runtime_budget:g}s runtime budget; returning a partial result.'
+                if warning not in self.fetch_warnings:
+                    self.fetch_warnings.append(warning)
+                break
             queue.sort(key=lambda item: (-item[2], item[1], item[0]))
             profile_steam_id, depth, queued_score = queue.pop(0)
             if profile_steam_id in searched_steam_ids:
@@ -894,6 +908,11 @@ class TeamDetector:
                     (candidate['online'] or score >= min_score):
                     queue.append((next_steam_id, depth + 1, score))
                     queued_steam_ids.add(next_steam_id)
+
+        if stop_reason is None and len(queue) > 0 and len(searched_steam_ids) >= max_profiles:
+            stop_reason = 'profile_budget'
+        elapsed_seconds = max(0.0, self.monotonic_fn() - started_at)
+        truncated = len(queue) > 0
 
         if output_network:
             import networkx as nx
@@ -958,14 +977,19 @@ class TeamDetector:
                 'comment_profiles': len(comment_profiles),
                 'recursive_depth': self.recursive_depth,
                 'min_score': min_score,
-                'max_profiles': max_profiles
+                'max_profiles': max_profiles,
+                'max_runtime_seconds': runtime_budget,
+                'elapsed_seconds': round(elapsed_seconds, 3),
+                'truncated': truncated,
+                'stop_reason': stop_reason,
+                'frontier_remaining': len(queue)
             },
             'fetch_stats': self.fetch_stats,
             'warnings': self.fetch_warnings,
             'roster': self.roster_status,
             'partial': self.fetch_stats.get('failed', 0) > 0 or len(skipped_steam_ids) > 0 or
                        not self.roster_status.get('available', False) or
-                       not self.roster_status.get('complete', False),
+                       not self.roster_status.get('complete', False) or truncated,
             'candidates': [{
                 'name': candidate['name'],
                 'steam_id': candidate['steam_id'],
@@ -1341,6 +1365,9 @@ def main():
                         help=f'Maximum Steam profiles to inspect in auto-discover mode (Default {AUTO_MAX_PROFILES}).')
     parser.add_argument('--auto-min-score', type=int, required=False,
                         help=f'Minimum score for non-online candidates in auto-discover mode (Default {AUTO_MIN_SCORE}).')
+    parser.add_argument('--auto-max-runtime-seconds', type=float, required=False,
+                        help=f'Maximum runtime for auto-discover before returning partial results '
+                             f'(Default {AUTO_MAX_RUNTIME_SECONDS:g}s).')
     parser.add_argument('--request-delay', type=float, required=False,
                         help='Delay in seconds between web requests (Default 0).')
     parser.add_argument('--cache-path', type=str, required=False,
@@ -1370,6 +1397,8 @@ def main():
     auto_discover = args.auto_discover
     auto_max_profiles = AUTO_MAX_PROFILES if args.auto_max_profiles == None else args.auto_max_profiles
     auto_min_score = AUTO_MIN_SCORE if args.auto_min_score == None else args.auto_min_score
+    auto_max_runtime_seconds = AUTO_MAX_RUNTIME_SECONDS if args.auto_max_runtime_seconds == None else \
+        args.auto_max_runtime_seconds
     request_delay = 0.0 if args.request_delay == None else args.request_delay
     cache_path = args.cache_path
     request_retries = args.request_retries
@@ -1425,6 +1454,7 @@ def main():
         print(f' - Auto Discover:               {auto_discover}')
         print(f' - Auto Max Profiles:           {auto_max_profiles}')
         print(f' - Auto Min Score:              {auto_min_score}')
+        print(f' - Auto Max Runtime Seconds:    {auto_max_runtime_seconds}')
         print(f' - Request Delay:               {request_delay}')
         print(f' - JSON Output:                 {json_output}')
         print(f' - Network Output:              {output_network}')
@@ -1437,7 +1467,8 @@ def main():
                       cache_path, request_retries, battlemetrics_players, player_roster)
     if auto_discover:
         result = td.start_auto_discovery(battlemetrics_id, steam_id, auto_max_profiles, auto_min_score,
-                                         output_network, network_output_path, not json_output)
+                                         output_network, network_output_path, not json_output,
+                                         auto_max_runtime_seconds)
     else:
         result = td.start_search(battlemetrics_id, steam_id, output_network, network_output_path, not json_output)
 

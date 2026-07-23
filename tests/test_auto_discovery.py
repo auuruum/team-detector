@@ -95,6 +95,27 @@ class AutoDiscoveryTests(unittest.TestCase):
             'type': 'comments'
         }])
 
+    def test_runtime_budget_returns_partial_result_with_remaining_frontier(self):
+        seed = '76561190000000001'
+        friend = '76561190000000002'
+        clock_values = iter([0.0, 0.0, 2.0, 2.0])
+        self.detector.monotonic_fn = lambda: next(clock_values)
+        self.detector._TeamDetector__collect_profile_people = lambda _profile_id, include_comments=None: (
+            'Seed', None, [self.person(friend, 'Friend')]
+        )
+
+        result = self.detector.start_auto_discovery(
+            'rustplus:test', [seed], max_profiles=75, min_score=2,
+            output_network=False, human_output=False, max_runtime_seconds=1
+        )
+
+        self.assertEqual(result['inspected_profiles'], [seed])
+        self.assertTrue(result['partial'])
+        self.assertTrue(result['crawl']['truncated'])
+        self.assertEqual(result['crawl']['stop_reason'], 'runtime_budget')
+        self.assertEqual(result['crawl']['frontier_remaining'], 1)
+        self.assertTrue(any('runtime budget' in warning for warning in result['warnings']))
+
 
 if __name__ == '__main__':
     unittest.main()
