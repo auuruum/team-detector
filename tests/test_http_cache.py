@@ -189,6 +189,39 @@ class HttpCacheTests(unittest.TestCase):
         self.assertEqual(result.source, 'stale')
         self.assertIn('HTTP 503', result.warning)
 
+    def test_persisted_long_cooldown_returns_stale_without_sleeping_or_requesting(self):
+        session = Mock()
+        session.headers = {}
+        sleeps = []
+        client = ResilientHttpClient(
+            self.cache_path, session=session, sleep_fn=sleeps.append, time_fn=lambda: 1000
+        )
+        client.cache.put('https://steamcommunity.com/a', 'stale', 10, 600, now=900)
+        client.cache.set_rate_state('steamcommunity.com', 4600, 3)
+
+        result = client.get('https://steamcommunity.com/a', 60, 600)
+
+        self.assertEqual(result.source, 'stale')
+        self.assertIn('cooldown', result.warning)
+        self.assertEqual(sleeps, [])
+        session.get.assert_not_called()
+
+    def test_persisted_long_cooldown_returns_partial_without_blocking_when_cache_is_empty(self):
+        session = Mock()
+        session.headers = {}
+        sleeps = []
+        client = ResilientHttpClient(
+            self.cache_path, session=session, sleep_fn=sleeps.append, time_fn=lambda: 1000
+        )
+        client.cache.set_rate_state('steamcommunity.com', 4600, 3)
+
+        result = client.get('https://steamcommunity.com/a', 60, 600)
+
+        self.assertEqual(result.source, 'failed')
+        self.assertIn('cooldown', result.warning)
+        self.assertEqual(sleeps, [])
+        session.get.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -81,6 +81,7 @@ class TeamDetector:
             'complete': False,
             'observed_at': None,
             'size': 0,
+            'population': None,
             'unique_names': 0,
             'name_counts': {},
             'reason': None
@@ -581,7 +582,7 @@ class TeamDetector:
         return f'name:{person["name"]}'
 
 
-    def __collect_profile_people(self, profile_steam_id: str) -> tuple[str, str, list]:
+    def __collect_profile_people(self, profile_steam_id: str, include_comments: bool | None = None) -> tuple[str, str, list]:
         """
         Collect friends and comment authors from one Steam profile.
 
@@ -599,7 +600,9 @@ class TeamDetector:
         if self.is_steam_profile_friends_public(profile_steam_id):
             people += self.get_steam_profile_friends(profile_steam_id)
 
-        if self.search_comments and self.search_comments_max_pages > 0 and \
+        should_search_comments = self.search_comments if include_comments is None else \
+            self.search_comments and include_comments
+        if should_search_comments and self.search_comments_max_pages > 0 and \
             self.is_steam_profile_comments_public(profile_steam_id):
             number_of_comments = self.get_number_of_comments(profile_steam_id)
             for i in range(1, self.search_comments_max_pages + 1):
@@ -798,8 +801,9 @@ class TeamDetector:
         searched_steam_ids = []
         skipped_steam_ids = []
         queued_steam_ids = set(steam_ids)
-        queue = [(steam_id, 0) for steam_id in steam_ids]
+        queue = [(steam_id, 0, 1000) for steam_id in steam_ids]
         candidates = dict()
+        comment_profiles = []
 
         def ensure_candidate(person: dict) -> dict:
             key = self.__get_person_key(person)
@@ -833,7 +837,8 @@ class TeamDetector:
             return candidate
 
         while len(queue) > 0 and len(searched_steam_ids) < max_profiles:
-            profile_steam_id, depth = queue.pop(0)
+            queue.sort(key=lambda item: (-item[2], item[1], item[0]))
+            profile_steam_id, depth, queued_score = queue.pop(0)
             if profile_steam_id in searched_steam_ids:
                 continue
             if depth > self.recursive_depth:
@@ -843,7 +848,11 @@ class TeamDetector:
             searched_steam_ids.append(profile_steam_id)
 
             try:
-                profile_name, profile_custom_id, people = self.__collect_profile_people(profile_steam_id)
+                include_comments = self.search_comments and (depth == 0 or queued_score >= 4)
+                if include_comments:
+                    comment_profiles.append(profile_steam_id)
+                profile_name, profile_custom_id, people = self.__collect_profile_people(
+                    profile_steam_id, include_comments=include_comments)
             except SystemExit as error:
                 skipped_steam_ids.append(profile_steam_id)
                 warning = f'Skipped Steam profile {profile_steam_id}: {error or "request unavailable"}'
@@ -883,7 +892,7 @@ class TeamDetector:
                 if next_steam_id != None and next_steam_id not in queued_steam_ids and \
                     next_steam_id not in searched_steam_ids and depth < self.recursive_depth and \
                     (candidate['online'] or score >= min_score):
-                    queue.append((next_steam_id, depth + 1))
+                    queue.append((next_steam_id, depth + 1, score))
                     queued_steam_ids.add(next_steam_id)
 
         if output_network:
@@ -943,11 +952,20 @@ class TeamDetector:
             'skipped_profiles': skipped_steam_ids,
             'min_score': min_score,
             'max_profiles': max_profiles,
+            'crawl': {
+                'comments_enabled': self.search_comments,
+                'comment_pages': self.search_comments_max_pages,
+                'comment_profiles': len(comment_profiles),
+                'recursive_depth': self.recursive_depth,
+                'min_score': min_score,
+                'max_profiles': max_profiles
+            },
             'fetch_stats': self.fetch_stats,
             'warnings': self.fetch_warnings,
             'roster': self.roster_status,
             'partial': self.fetch_stats.get('failed', 0) > 0 or len(skipped_steam_ids) > 0 or
-                       not self.roster_status.get('available', False),
+                       not self.roster_status.get('available', False) or
+                       not self.roster_status.get('complete', False),
             'candidates': [{
                 'name': candidate['name'],
                 'steam_id': candidate['steam_id'],
@@ -996,6 +1014,7 @@ class TeamDetector:
                 'complete': bool(self.player_roster.get('complete', False)),
                 'observed_at': self.player_roster.get('observedAt'),
                 'size': len(players),
+                'population': self.player_roster.get('population'),
                 'unique_names': len(name_counts),
                 'name_counts': name_counts,
                 'reason': self.player_roster.get('reason')
@@ -1225,38 +1244,41 @@ class TeamDetector:
 
         content = self.__get_steam_profile_comments_page_content_by_steam_id(steam_id, page)
 
-        regex = r'hoverunderline commentthread_author_link" ' \
-                r'href="https://steamcommunity.com/profiles/(.*?)".*?<bdi>(.*?)<\/bdi>'
-        comments_authors_steam_id = re.findall(regex, content, re.MULTILINE|re.S)
-
-        regex = r'hoverunderline commentthread_author_link" ' \
-                r'href="https://steamcommunity.com/id/(.*?)".*?<bdi>(.*?)<\/bdi>'
-        comments_authors_custom_id = re.findall(regex, content, re.MULTILINE|re.S)
-
-        total_read_comments = len(comments_authors_steam_id) + len(comments_authors_custom_id)
-
         comments_page_authors = []
-        for author_steam_id, author_name in comments_authors_steam_id:
+        regex = r'hoverunderline commentthread_author_link"\s+' \
+                r'href="https://steamcommunity.com/(profiles|id)/([^"/]+)"\s+' \
+                r'data-miniprofile="(\d+)".*?<bdi>(.*?)<\/bdi>'
+        author_matches = re.findall(regex, content, re.MULTILINE|re.S)
+
+        for profile_kind, profile_value, account_id, author_name in author_matches:
+            author_steam_id = profile_value if profile_kind == 'profiles' else \
+                str(76561197960265728 + int(account_id))
+            author_custom_id = profile_value if profile_kind == 'id' else None
             if any(author['steam_id'] == author_steam_id for author in comments_page_authors):
                 continue
 
-            author = dict()
-            author['steam_id'] = author_steam_id
-            author['custom_id'] = None
-            author['name'] = self.__clean_name(author_name)
-            author['type'] = 'comments'
-            comments_page_authors.append(author)
+            if author_custom_id != None:
+                self.custom_id_translation_table[author_custom_id] = author_steam_id
+            comments_page_authors.append({
+                'steam_id': author_steam_id,
+                'custom_id': author_custom_id,
+                'name': self.__clean_name(author_name),
+                'type': 'comments'
+            })
 
-        for author_custom_id, author_name in comments_authors_custom_id:
-            if any(author['custom_id'] == author_custom_id for author in comments_page_authors):
-                continue
+        if len(author_matches) == 0:
+            legacy_regex = r'hoverunderline commentthread_author_link"\s+' \
+                           r'href="https://steamcommunity.com/(profiles|id)/([^"/]+)".*?<bdi>(.*?)<\/bdi>'
+            for profile_kind, profile_value, author_name in re.findall(
+                    legacy_regex, content, re.MULTILINE|re.S):
+                comments_page_authors.append({
+                    'steam_id': profile_value if profile_kind == 'profiles' else None,
+                    'custom_id': profile_value if profile_kind == 'id' else None,
+                    'name': self.__clean_name(author_name),
+                    'type': 'comments'
+                })
 
-            author = dict()
-            author['steam_id'] = None
-            author['custom_id'] = author_custom_id
-            author['name'] = self.__clean_name(author_name)
-            author['type'] = 'comments'
-            comments_page_authors.append(author)
+        total_read_comments = len(author_matches) if len(author_matches) > 0 else len(comments_page_authors)
 
         self.__print(f'get_steam_profile_comments_page_authors(steam_id:{steam_id}, page:{page}) -> ' +
                      f'total_read_comments:{total_read_comments}, List[comments_page_authors:' +

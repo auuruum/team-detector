@@ -104,6 +104,7 @@ class PersistentHttpCache:
 
 class ResilientHttpClient:
     RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+    MAX_INTERACTIVE_COOLDOWN_SECONDS = 30.0
 
     def __init__(self, cache_path: str, request_delay: float = 0.0, max_retries: int = 3,
                  session=None, sleep_fn=time.sleep, time_fn=time.time):
@@ -149,6 +150,14 @@ class ResilientHttpClient:
 
         host = urlparse(url).netloc.lower()
         last_warning = None
+        state = self.cache.get_rate_state(host)
+        cooldown_remaining = max(0.0, state['cooldown_until'] - self.time_fn())
+        if cooldown_remaining > self.MAX_INTERACTIVE_COOLDOWN_SECONDS:
+            last_warning = f'{host} is in cooldown for {cooldown_remaining:.1f}s; using cached data if available'
+            if cached:
+                return FetchResult(cached['body'], 'stale', last_warning)
+            return FetchResult('', 'failed', last_warning)
+
         for attempt in range(self.max_retries + 1):
             self._respect_delay(host)
             self._last_request_at = self.time_fn()
